@@ -14,14 +14,19 @@ from src.parser import parse_pdf
 
 
 def get_pdf_report_date(pdf_path: Path) -> str:
-    """Extract report_date from PDF header or filename for chronological sorting."""
+    """Extract report_date from filename or PDF header for chronological sorting."""
+    # 1. Fast check from filename without opening the file
+    date_str, _, _, _ = parse_report_date("", pdf_path.name)
+    if date_str:
+        return date_str
+
+    # 2. Fallback to reading first page header with PyMuPDF
     try:
-        doc = fitz.open(pdf_path)
-        p0_text = doc[0].get_text() if len(doc) > 0 else ""
-        doc.close()
-        date_str, _, _, _ = parse_report_date(p0_text, pdf_path.name)
-        if date_str:
-            return date_str
+        with fitz.open(pdf_path) as doc:
+            p0_text = doc[0].get_text() if len(doc) > 0 else ""
+            date_str, _, _, _ = parse_report_date(p0_text, pdf_path.name)
+            if date_str:
+                return date_str
     except Exception:
         pass
     return pdf_path.name

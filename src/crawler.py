@@ -48,12 +48,20 @@ def fetch_calendar_events(start_date: str, end_date: str) -> List[Dict]:
         return []
 
 
-def filter_weekly_latest_events(events: List[Dict]) -> List[Dict]:
+def filter_weekly_latest_events(events: List[Dict], max_end_date: Optional[str] = None) -> List[Dict]:
     """Group calendar events by ISO year and week, and pick the latest available
-
     event in each week (e.g. Friday, or Thursday/Wednesday if holidays occur).
     This enables historical backfill using only 1 representative file per week.
+
+    If max_end_date is provided, weeks whose Monday falls after max_end_date are excluded.
     """
+    max_end_dt = None
+    if max_end_date:
+        try:
+            max_end_dt = datetime.strptime(max_end_date, "%Y-%m-%d").date()
+        except Exception:
+            pass
+
     weeks = {}
     for ev in events:
         start_str = ev.get("start", "")
@@ -62,6 +70,11 @@ def filter_weekly_latest_events(events: List[Dict]) -> List[Dict]:
         date_part = start_str.split("T")[0]
         try:
             dt = datetime.strptime(date_part, "%Y-%m-%d")
+            # Monday of the event's week
+            monday_dt = (dt - timedelta(days=dt.weekday())).date()
+            if max_end_dt and monday_dt > max_end_dt:
+                continue
+
             year_week = dt.isocalendar()[:2]  # (iso_year, iso_week)
             if year_week not in weeks or dt > weeks[year_week][0]:
                 weeks[year_week] = (dt, ev)
@@ -135,7 +148,7 @@ def crawl_date_range(start_date: str, end_date: str, weekly_only: bool = False) 
     print(f"Found {len(events)} report events between {start_date} and {query_end}.")
 
     if weekly_only:
-        events = filter_weekly_latest_events(events)
+        events = filter_weekly_latest_events(events, max_end_date=end_date)
         print(f"Filtered to {len(events)} weekly representative reports (last published day of each week).")
 
     downloaded_paths = []

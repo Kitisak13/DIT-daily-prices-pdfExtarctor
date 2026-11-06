@@ -471,52 +471,51 @@ def parse_pdf(pdf_path: str | Path, multi_column: bool = True) -> List[Dict]:
     now_utc = datetime.now(timezone.utc).isoformat()
 
     try:
-        doc = fitz.open(pdf_path)
+        with fitz.open(pdf_path) as doc:
+            total_pages = len(doc)
+            if total_pages == 0:
+                return records
+
+            # 1. Extract Report Date from first page or filename
+            p1_text = doc[0].get_text() or ""
+            date_str, day, month, year = parse_report_date(p1_text, filename)
+
+            if not date_str:
+                print(f"[Warning] Could not extract report_date from {filename}")
+                return records
+
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            report_wd = dt.weekday()
+            monday_dt = dt - timedelta(days=report_wd)
+            week_dates = {wd: (monday_dt + timedelta(days=wd)).strftime("%Y-%m-%d") for wd in range(5)}
+
+            # Never extract columns in the future relative to this report date
+            max_allowed_wd = min(report_wd, 4)
+            target_wds = list(range(max_allowed_wd + 1)) if multi_column else [max_allowed_wd]
+
+            # 2. Iterate through pages and classify section
+            paddy_category = "ข้าวเปลือก"
+            for p_idx in range(total_pages):
+                page = doc[p_idx]
+                page_text = fix_thai_pdf_text(page.get_text())
+
+                is_paddy = "ข้าวเปลือก" in page_text and not ("ขายส่งทั่วไป" in page_text or "รำข้าว" in page_text)
+                is_milled = ("ขายส่งทั่วไป" in page_text or "มาตรฐานกระทรวงพาณิชย์" in page_text) and "รำข้าว" not in page_text
+                is_other = "รำข้าว" in page_text or "ขายปลีก" in page_text or "กระสอบป่าน" in page_text
+
+                if is_paddy:
+                    p_recs, paddy_category = _parse_paddy_page(
+                        page, p_idx, week_dates, target_wds, filename, now_utc, paddy_category
+                    )
+                    records.extend(p_recs)
+                elif is_milled:
+                    m_recs = _parse_milled_page(page, p_idx, week_dates, target_wds, filename, now_utc)
+                    records.extend(m_recs)
+                elif is_other:
+                    o_recs = _parse_other_page(page, p_idx, week_dates, target_wds, filename, now_utc)
+                    records.extend(o_recs)
     except Exception as e:
-        print(f"[Error] Failed to open PDF {pdf_path}: {e}")
+        print(f"[Error] Failed to open/parse PDF {pdf_path}: {e}")
         return records
-
-    total_pages = len(doc)
-    if total_pages == 0:
-        return records
-
-    # 1. Extract Report Date from first page or filename
-    p1_text = doc[0].get_text() or ""
-    date_str, day, month, year = parse_report_date(p1_text, filename)
-
-    if not date_str:
-        print(f"[Warning] Could not extract report_date from {filename}")
-        return records
-
-    dt = datetime.strptime(date_str, "%Y-%m-%d")
-    report_wd = dt.weekday()
-    monday_dt = dt - timedelta(days=report_wd)
-    week_dates = {wd: (monday_dt + timedelta(days=wd)).strftime("%Y-%m-%d") for wd in range(5)}
-
-    # Never extract columns in the future relative to this report date
-    max_allowed_wd = min(report_wd, 4)
-    target_wds = list(range(max_allowed_wd + 1)) if multi_column else [max_allowed_wd]
-
-    # 2. Iterate through pages and classify section
-    paddy_category = "ข้าวเปลือก"
-    for p_idx in range(total_pages):
-        page = doc[p_idx]
-        page_text = fix_thai_pdf_text(page.get_text())
-
-        is_paddy = "ข้าวเปลือก" in page_text and not ("ขายส่งทั่วไป" in page_text or "รำข้าว" in page_text)
-        is_milled = ("ขายส่งทั่วไป" in page_text or "มาตรฐานกระทรวงพาณิชย์" in page_text) and "รำข้าว" not in page_text
-        is_other = "รำข้าว" in page_text or "ขายปลีก" in page_text or "กระสอบป่าน" in page_text
-
-        if is_paddy:
-            p_recs, paddy_category = _parse_paddy_page(
-                page, p_idx, week_dates, target_wds, filename, now_utc, paddy_category
-            )
-            records.extend(p_recs)
-        elif is_milled:
-            m_recs = _parse_milled_page(page, p_idx, week_dates, target_wds, filename, now_utc)
-            records.extend(m_recs)
-        elif is_other:
-            o_recs = _parse_other_page(page, p_idx, week_dates, target_wds, filename, now_utc)
-            records.extend(o_recs)
 
     return records

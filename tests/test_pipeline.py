@@ -106,6 +106,11 @@ class TestDITRicePipeline(unittest.TestCase):
         self.assertEqual(filtered[0]["start"], "2026-11-05T08:00:00")
         self.assertEqual(filtered[1]["start"], "2026-11-13T08:00:00")
 
+        # With max_end_date cutting off the next week (e.g. Friday 2026-11-06)
+        filtered_bounded = filter_weekly_latest_events(sample_events, max_end_date="2026-11-06")
+        self.assertEqual(len(filtered_bounded), 1)
+        self.assertEqual(filtered_bounded[0]["start"], "2026-11-05T08:00:00")
+
     def test_parse_sample_pdf(self):
         from src.config import DEDUPLICATION_KEY
         import pandas as pd
