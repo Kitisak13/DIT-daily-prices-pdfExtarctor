@@ -3,11 +3,28 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
+import fitz
+
 from src.ai_fallback import extract_with_gemini
 from src.config import DATA_DIR, MASTER_CSV_PATH, MASTER_EXCEL_PATH, PDF_DIR
 from src.crawler import crawl_date_range
 from src.exporter import export_master_excel, save_daily_csv, update_master_csv
+from src.normalizer import parse_report_date
 from src.parser import parse_pdf
+
+
+def get_pdf_report_date(pdf_path: Path) -> str:
+    """Extract report_date from PDF header or filename for chronological sorting."""
+    try:
+        doc = fitz.open(pdf_path)
+        p0_text = doc[0].get_text() if len(doc) > 0 else ""
+        doc.close()
+        date_str, _, _, _ = parse_report_date(p0_text, pdf_path.name)
+        if date_str:
+            return date_str
+    except Exception:
+        pass
+    return pdf_path.name
 
 
 def process_pdf_file(
@@ -101,8 +118,10 @@ def main():
     pdf_files_to_process = []
 
     if args.process_local:
-        pdf_files_to_process = sorted(list(PDF_DIR.rglob("*.pdf")))
-        print(f"Found {len(pdf_files_to_process)} local PDF files to process.")
+        pdf_files = list(PDF_DIR.rglob("*.pdf"))
+        # Sort chronologically by actual report date
+        pdf_files_to_process = sorted(pdf_files, key=get_pdf_report_date)
+        print(f"Found {len(pdf_files_to_process)} local PDF files to process (sorted chronologically).")
     else:
         # Determine crawl date range
         today = datetime.now().date()

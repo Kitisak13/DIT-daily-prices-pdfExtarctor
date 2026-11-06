@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 import requests
@@ -119,10 +119,20 @@ def crawl_date_range(start_date: str, end_date: str, weekly_only: bool = False) 
     """Discover and download PDF reports in the given date range.
 
     If weekly_only=True, only downloads the last available report of each week.
+    Automatically extends query range by 6 days when weekly_only=True to prevent
+    boundary clipping of the last week.
     Returns a list of local PDF paths.
     """
-    events = fetch_calendar_events(start_date, end_date)
-    print(f"Found {len(events)} report events between {start_date} and {end_date}.")
+    query_end = end_date
+    if weekly_only:
+        try:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            query_end = (end_dt + timedelta(days=6)).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    events = fetch_calendar_events(start_date, query_end)
+    print(f"Found {len(events)} report events between {start_date} and {query_end}.")
 
     if weekly_only:
         events = filter_weekly_latest_events(events)
