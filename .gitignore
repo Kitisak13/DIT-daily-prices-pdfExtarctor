@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Data & Documents (Never commit PDFs, extracted datasets, or logs)
+data/
+*.pdf
+rice_prices_master.csv
+*.csv
+*.xlsx
+*.xls
+
+# Internal Reviews & Scratch files
+dev_review/
+scratch/
+
+# Environments, Secrets & Credentials
+.env
+.env.*
+.exv*
+*.pem
+*.key
+credentials.json
+token.json
+
+# IDEs & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
