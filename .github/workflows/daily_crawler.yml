@@ -1,0 +1,43 @@
+name: Daily Rice Price Crawler
+
+on:
+  schedule:
+    # 10:00 UTC = 17:00 Bangkok Time (UTC+7), Monday to Friday
+    - cron: '0 10 * * 1-5'
+  workflow_dispatch: # Allows manual trigger with a single click from GitHub UI
+
+jobs:
+  crawl-and-extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Extraction Pipeline (with 3 Retries & 10-min Delay)
+        run: |
+          # --latest 7 covers the entire sliding week to capture any intra-week price adjustments
+          # --retry 3 --retry-delay 600 checks up to 3 times (10-min gap) if today's file is delayed
+          python main.py --latest 7 --retry 3 --retry-delay 600
+
+      - name: Upload Daily Artifacts (CSVs & Excel)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daily-rice-prices
+          path: |
+            data/extracted/csv/*.csv
+            data/excel/*.xlsx
+            rice_prices_master.csv
+          retention-days: 30

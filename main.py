@@ -112,6 +112,18 @@ def main():
         action="store_true",
         help="Re-generate Master Excel from Master CSV",
     )
+    parser.add_argument(
+        "--retry",
+        type=int,
+        default=1,
+        help="Number of retry attempts if today's report is not yet published (default: 1)",
+    )
+    parser.add_argument(
+        "--retry-delay",
+        type=int,
+        default=600,
+        help="Delay in seconds between retry attempts (default: 600s / 10 mins)",
+    )
 
     args = parser.parse_args()
 
@@ -137,13 +149,26 @@ def main():
             start_date = (today - timedelta(days=args.latest)).strftime("%Y-%m-%d")
             end_date = today.strftime("%Y-%m-%d")
         else:
-            # Default: last 7 days
+            # Default: last 7 days (sliding window to capture intra-week adjustments)
             start_date = (today - timedelta(days=7)).strftime("%Y-%m-%d")
             end_date = today.strftime("%Y-%m-%d")
 
-        print(f"Checking for reports from {start_date} to {end_date} (weekly_only={args.weekly_only})...")
-        pdf_files_to_process = crawl_date_range(start_date, end_date, weekly_only=args.weekly_only)
-        pdf_files_to_process = sorted(pdf_files_to_process, key=get_pdf_report_date)
+        max_attempts = max(1, args.retry)
+        for attempt in range(1, max_attempts + 1):
+            print(f"Checking for reports from {start_date} to {end_date} (attempt {attempt}/{max_attempts}, weekly_only={args.weekly_only})...")
+            pdf_files_to_process = crawl_date_range(start_date, end_date, weekly_only=args.weekly_only)
+            pdf_files_to_process = sorted(pdf_files_to_process, key=get_pdf_report_date)
+
+            # If today is a weekday and today's file not yet available, retry if attempts remain
+            today_str = today.strftime("%Y-%m-%d")
+            has_today = any(today_str in p.name or get_pdf_report_date(p) == today_str for p in pdf_files_to_process)
+
+            if has_today or attempt == max_attempts or today.weekday() >= 5:
+                break
+
+            print(f"[Wait] Today's report ({today_str}) not yet published. Retrying in {args.retry_delay}s ({attempt}/{max_attempts})...")
+            import time
+            time.sleep(args.retry_delay)
 
     if not pdf_files_to_process:
         print("No PDF files to process.")
