@@ -143,6 +143,7 @@ def main():
 
         print(f"Checking for reports from {start_date} to {end_date} (weekly_only={args.weekly_only})...")
         pdf_files_to_process = crawl_date_range(start_date, end_date, weekly_only=args.weekly_only)
+        pdf_files_to_process = sorted(pdf_files_to_process, key=get_pdf_report_date)
 
     if not pdf_files_to_process:
         print("No PDF files to process.")

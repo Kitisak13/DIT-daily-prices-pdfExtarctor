@@ -65,9 +65,17 @@ def filter_weekly_latest_events(events: List[Dict], max_end_date: Optional[str] 
     weeks = {}
     for ev in events:
         start_str = ev.get("start", "")
-        if not start_str:
-            continue
-        date_part = start_str.split("T")[0]
+        date_part = start_str.split("T")[0] if start_str else ""
+        # Check for invalid year (e.g. 0001-01-01) and recover from title
+        if not date_part or date_part.startswith("000") or int(date_part.split("-")[0]) < 2000:
+            title = ev.get("title", "")
+            m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", title)
+            if m:
+                date_part = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+                ev["start"] = date_part
+            else:
+                continue
+
         try:
             dt = datetime.strptime(date_part, "%Y-%m-%d")
             # Monday of the event's week
@@ -99,6 +107,12 @@ def download_report(event: Dict) -> Optional[Path]:
 
     # Determine date for folder hierarchy (YYYY/MM)
     start_date = event.get("start")
+    if not start_date or start_date.startswith("000") or int(start_date.split("-")[0]) < 2000:
+        title = event.get("title", "")
+        m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", title)
+        if m:
+            start_date = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+
     if start_date and re.match(r"^\d{4}-\d{2}-\d{2}", start_date):
         date_part = start_date.split("T")[0]
         year, month, _ = date_part.split("-")
@@ -152,8 +166,16 @@ def crawl_date_range(start_date: str, end_date: str, weekly_only: bool = False) 
         print(f"Filtered to {len(events)} weekly representative reports (last published day of each week).")
 
     downloaded_paths = []
-    for event in events:
-        p = download_report(event)
-        if p:
-            downloaded_paths.append(p)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Download concurrently with a polite worker pool (8 workers)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_event = {executor.submit(download_report, ev): ev for ev in events}
+        for future in as_completed(future_to_event):
+            try:
+                p = future.result()
+                if p:
+                    downloaded_paths.append(p)
+            except Exception as e:
+                print(f"[Download Exception]: {e}")
     return downloaded_paths

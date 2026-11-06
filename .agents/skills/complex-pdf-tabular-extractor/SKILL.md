@@ -120,3 +120,4 @@ To backfill multiple years efficiently:
 For large batch jobs:
 1. **Always use Context Managers**: `with fitz.open(pdf_path) as doc:`
 2. **Fast Filename Pre-Check**: Parse date from filename regex before opening the PDF document stream during sorting phases to avoid duplicate I/O.
+
