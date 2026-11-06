@@ -10,13 +10,19 @@ from src.exporter import export_master_excel, save_daily_csv, update_master_csv
 from src.parser import parse_pdf
 
 
-def process_pdf_file(pdf_path: Path, use_ai: bool = False, api_key: str = None) -> list:
+def process_pdf_file(
+    pdf_path: Path,
+    multi_column: bool = True,
+    use_ai: bool = False,
+    api_key: str = None,
+) -> list:
     """Parse a single PDF file, fallback to AI if requested or if library produces 0 records."""
-    print(f"Processing: {pdf_path.name}...")
+    mode_str = "Multi-Column Weekly Matrix" if multi_column else "Single-Day"
+    print(f"Processing: {pdf_path.name} ({mode_str})...")
     records = []
     if not use_ai:
         try:
-            records = parse_pdf(pdf_path)
+            records = parse_pdf(pdf_path, multi_column=multi_column)
         except Exception as e:
             print(f"[Parser Error on {pdf_path.name}]: {e}")
 
@@ -26,11 +32,9 @@ def process_pdf_file(pdf_path: Path, use_ai: bool = False, api_key: str = None) 
         records = extract_with_gemini(pdf_path, api_key=api_key)
 
     if records:
-        # Group by report_date to save daily CSV
-        report_date = records[0].get("report_date")
-        if report_date:
-            daily_csv_path = save_daily_csv(records, report_date)
-            print(f"  -> Saved daily CSV: {daily_csv_path.name} ({len(records)} records)")
+        saved_csvs = save_daily_csv(records)
+        dates_saved = [f.name for f in saved_csvs]
+        print(f"  -> Saved {len(saved_csvs)} daily CSV(s): {', '.join(dates_saved)} (total {len(records)} records)")
 
     return records
 
@@ -61,9 +65,19 @@ def main():
         help="Process all already-downloaded PDFs in data/pdf/ without crawling",
     )
     parser.add_argument(
+        "--weekly-only",
+        action="store_true",
+        help="Download only the last published report of each week (ideal for historical backfills)",
+    )
+    parser.add_argument(
+        "--single-day",
+        action="store_true",
+        help="Extract only the single day of report header instead of full multi-column week",
+    )
+    parser.add_argument(
         "--use-ai",
         action="store_true",
-        help="Use Gemini Agentic AI extractor instead of pdfplumber",
+        help="Use Gemini Agentic AI extractor instead of PyMuPDF parser",
     )
     parser.add_argument(
         "--api-key",
@@ -103,16 +117,23 @@ def main():
             start_date = (today - timedelta(days=7)).strftime("%Y-%m-%d")
             end_date = today.strftime("%Y-%m-%d")
 
-        print(f"Checking for reports from {start_date} to {end_date}...")
-        pdf_files_to_process = crawl_date_range(start_date, end_date)
+        print(f"Checking for reports from {start_date} to {end_date} (weekly_only={args.weekly_only})...")
+        pdf_files_to_process = crawl_date_range(start_date, end_date, weekly_only=args.weekly_only)
 
     if not pdf_files_to_process:
         print("No PDF files to process.")
         return
 
     all_new_records = []
+    multi_column = not args.single_day
+
     for pdf_path in pdf_files_to_process:
-        recs = process_pdf_file(pdf_path, use_ai=args.use_ai, api_key=args.api_key)
+        recs = process_pdf_file(
+            pdf_path,
+            multi_column=multi_column,
+            use_ai=args.use_ai,
+            api_key=args.api_key,
+        )
         all_new_records.extend(recs)
 
     if all_new_records:
@@ -129,4 +150,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

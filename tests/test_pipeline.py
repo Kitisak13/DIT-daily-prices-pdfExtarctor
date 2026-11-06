@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 
+from src.crawler import filter_weekly_latest_events
 from src.normalizer import (
     clean_price_cell,
     fix_thai_pdf_text,
@@ -92,6 +93,19 @@ class TestDITRicePipeline(unittest.TestCase):
         ok2, msg2 = validate_record(invalid_price)
         self.assertFalse(ok2)
 
+    def test_filter_weekly_latest_events(self):
+        sample_events = [
+            {"start": "2026-11-02T08:00:00", "title": "Mon Report", "url": "/mon.pdf"},
+            {"start": "2026-11-03T08:00:00", "title": "Tue Report", "url": "/tue.pdf"},
+            {"start": "2026-11-05T08:00:00", "title": "Thu Report (Holiday Fri)", "url": "/thu.pdf"},
+            {"start": "2026-11-09T08:00:00", "title": "Next Mon", "url": "/next_mon.pdf"},
+            {"start": "2026-11-13T08:00:00", "title": "Next Fri", "url": "/next_fri.pdf"},
+        ]
+        filtered = filter_weekly_latest_events(sample_events)
+        self.assertEqual(len(filtered), 2)
+        self.assertEqual(filtered[0]["start"], "2026-11-05T08:00:00")
+        self.assertEqual(filtered[1]["start"], "2026-11-13T08:00:00")
+
     def test_parse_sample_pdf(self):
         from src.config import DEDUPLICATION_KEY
         import pandas as pd
@@ -101,22 +115,28 @@ class TestDITRicePipeline(unittest.TestCase):
             Path("data/pdf/2024/05/010567.pdf"),
         ]:
             if sample_path.exists():
-                records = parse_pdf(sample_path)
-                self.assertGreater(len(records), 100)
-                sections = {r["section"] for r in records}
+                # Single day test
+                records_single = parse_pdf(sample_path, multi_column=False)
+                self.assertGreater(len(records_single), 100)
+                sections = {r["section"] for r in records_single}
                 self.assertIn("PaddyRice", sections)
                 self.assertIn("MilledRice", sections)
                 self.assertIn("OtherRice", sections)
 
-                df = pd.DataFrame(records)
-                # Verify zero duplicates on unique composite key
-                self.assertEqual(df.duplicated(subset=DEDUPLICATION_KEY).sum(), 0)
-                # Verify no suspicious min_price <= 10 (1.0 bug eliminated)
-                self.assertEqual((df["min_price"] <= 10.0).sum(), 0)
+                df_s = pd.DataFrame(records_single)
+                self.assertEqual(df_s.duplicated(subset=DEDUPLICATION_KEY).sum(), 0)
+                self.assertEqual((df_s["min_price"] <= 10.0).sum(), 0)
+
+                # Multi column test
+                records_multi = parse_pdf(sample_path, multi_column=True)
+                self.assertGreater(len(records_multi), len(records_single))
+                df_m = pd.DataFrame(records_multi)
+                self.assertEqual(df_m.duplicated(subset=DEDUPLICATION_KEY).sum(), 0)
+                self.assertEqual((df_m["min_price"] <= 10.0).sum(), 0)
 
         # Check all 7 target provinces across datasets
-        p2024 = parse_pdf("data/pdf/2024/05/010567.pdf")
-        p2026 = parse_pdf("data/pdf/2026/11/20261105160852_7171.pdf")
+        p2024 = parse_pdf("data/pdf/2024/05/010567.pdf", multi_column=False)
+        p2026 = parse_pdf("data/pdf/2026/11/20261105160852_7171.pdf", multi_column=False)
         df_all = pd.DataFrame(p2024 + p2026)
         all_provs = set(df_all["province"].dropna())
         target_provinces = [
@@ -131,7 +151,11 @@ class TestDITRicePipeline(unittest.TestCase):
         for tp in target_provinces:
             self.assertIn(tp, all_provs)
 
+        # Check MilledRice 40 rows in 2026
+        df_26 = pd.DataFrame(p2026)
+        milled_26 = df_26[df_26["section"] == "MilledRice"]
+        self.assertEqual(len(milled_26), 40)
+
 
 if __name__ == "__main__":
     unittest.main()
-

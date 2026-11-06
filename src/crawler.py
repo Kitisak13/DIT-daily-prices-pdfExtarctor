@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 import requests
@@ -47,6 +48,30 @@ def fetch_calendar_events(start_date: str, end_date: str) -> List[Dict]:
         return []
 
 
+def filter_weekly_latest_events(events: List[Dict]) -> List[Dict]:
+    """Group calendar events by ISO year and week, and pick the latest available
+
+    event in each week (e.g. Friday, or Thursday/Wednesday if holidays occur).
+    This enables historical backfill using only 1 representative file per week.
+    """
+    weeks = {}
+    for ev in events:
+        start_str = ev.get("start", "")
+        if not start_str:
+            continue
+        date_part = start_str.split("T")[0]
+        try:
+            dt = datetime.strptime(date_part, "%Y-%m-%d")
+            year_week = dt.isocalendar()[:2]  # (iso_year, iso_week)
+            if year_week not in weeks or dt > weeks[year_week][0]:
+                weeks[year_week] = (dt, ev)
+        except Exception:
+            continue
+
+    selected = [item[1] for item in sorted(weeks.values(), key=lambda x: x[0])]
+    return selected
+
+
 def download_report(event: Dict) -> Optional[Path]:
     """Download a single PDF report based on an event dictionary and store it in
 
@@ -61,10 +86,10 @@ def download_report(event: Dict) -> Optional[Path]:
 
     # Determine date for folder hierarchy (YYYY/MM)
     start_date = event.get("start")
-    if start_date and re.match(r"^\d{4}-\d{2}-\d{2}$", start_date):
-        year, month, _ = start_date.split("-")
+    if start_date and re.match(r"^\d{4}-\d{2}-\d{2}", start_date):
+        date_part = start_date.split("T")[0]
+        year, month, _ = date_part.split("-")
     else:
-        # Fallback to current year/month
         year = "unknown"
         month = "unknown"
 
@@ -90,17 +115,22 @@ def download_report(event: Dict) -> Optional[Path]:
         return None
 
 
-def crawl_date_range(start_date: str, end_date: str) -> List[Path]:
-    """Discover and download all PDF reports in the given date range.
+def crawl_date_range(start_date: str, end_date: str, weekly_only: bool = False) -> List[Path]:
+    """Discover and download PDF reports in the given date range.
 
+    If weekly_only=True, only downloads the last available report of each week.
     Returns a list of local PDF paths.
     """
     events = fetch_calendar_events(start_date, end_date)
     print(f"Found {len(events)} report events between {start_date} and {end_date}.")
+
+    if weekly_only:
+        events = filter_weekly_latest_events(events)
+        print(f"Filtered to {len(events)} weekly representative reports (last published day of each week).")
+
     downloaded_paths = []
     for event in events:
         p = download_report(event)
         if p:
             downloaded_paths.append(p)
     return downloaded_paths
-

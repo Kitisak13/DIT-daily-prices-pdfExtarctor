@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -25,8 +25,8 @@ WEEKDAY_FALLBACKS = [
 ]
 
 
-def _get_target_column_bounds(page: fitz.Page, target_wd: int) -> Tuple[float, float]:
-    """Dynamically determine the (x_min, x_max) bounding range for the target weekday column
+def _get_page_columns(page: fitz.Page) -> Dict[int, Tuple[float, float]]:
+    """Dynamically determine the (x_min, x_max) bounding range for each weekday column (0..4)
 
     by scanning header words (จันทร์, อังคาร, พุธ, พฤหัสบดี, ศุกร์) on the page.
     """
@@ -45,36 +45,40 @@ def _get_target_column_bounds(page: fitz.Page, target_wd: int) -> Tuple[float, f
         if wd_idx not in centers:
             centers[wd_idx] = c
 
-    if not centers or target_wd not in centers:
-        idx = min(max(target_wd, 0), 4)
-        return WEEKDAY_FALLBACKS[idx]
+    if not centers:
+        return {wd: WEEKDAY_FALLBACKS[wd] for wd in range(5)}
 
-    c = centers[target_wd]
-    if target_wd > 0 and (target_wd - 1) in centers:
-        x_min = (centers[target_wd - 1] + c) / 2.0
-    else:
-        x_min = c - 35.0
+    col_bounds = {}
+    sorted_wds = sorted(centers.keys())
+    for idx, wd in enumerate(sorted_wds):
+        c = centers[wd]
+        if idx > 0:
+            x_min = (centers[sorted_wds[idx - 1]] + c) / 2.0
+        else:
+            x_min = c - 35.0
 
-    if (target_wd + 1) in centers:
-        x_max = (c + centers[target_wd + 1]) / 2.0
-    else:
-        x_max = c + 35.0
+        if idx < len(sorted_wds) - 1:
+            x_max = (c + centers[sorted_wds[idx + 1]]) / 2.0
+        else:
+            x_max = c + 35.0
 
-    return x_min, x_max
+        col_bounds[wd] = (x_min, x_max)
+
+    return col_bounds
 
 
 def _parse_paddy_page(
     page: fitz.Page,
     p_idx: int,
-    date_str: str,
-    target_wd: int,
+    week_dates: Dict[int, str],
+    target_wds: List[int],
     filename: str,
     now_utc: str,
     initial_category: str = "ข้าวเปลือก",
 ) -> Tuple[List[Dict], str]:
-    """Extract Section 1: PaddyRice records from a given page."""
+    """Extract Section 1: PaddyRice records from a given page across target weekdays."""
     records = []
-    x_min, x_max = _get_target_column_bounds(page, target_wd)
+    col_bounds = _get_page_columns(page)
     words = page.get_text("words")
 
     lines = {}
@@ -94,49 +98,61 @@ def _parse_paddy_page(
         left_words = [w[4] for w in row_words if w[0] < 150]
         left_text = fix_thai_pdf_text(" ".join(left_words)).strip()
 
-        col_words = [w[4] for w in row_words if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
-
-        # Peek next line if price is slightly offset vertically
-        if not col_words and i + 1 < len(y_keys) and (y_keys[i + 1] - y <= 4.0):
-            next_row = sorted(lines[y_keys[i + 1]], key=lambda x: x[0])
-            next_col = [w[4] for w in next_row if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
-            next_left = [w[4] for w in next_row if w[0] < 150]
-            if next_col and not standardize_province(fix_thai_pdf_text(" ".join(next_left))):
-                col_words = next_col
-                i += 1
-
         if not left_text:
             i += 1
             continue
 
-        # Category switch: e.g. ข้าวเปลือกเจ้า นาปรัง ปี 2567, ข้าวเปลือกหอมมะลิ ปี 2569/70
+        # Category switch: capture full untruncated name up to x < 350
         if "ข้าวเปลือก" in left_text and not left_text.startswith("จังหวัด"):
-            current_category = left_text
+            full_header_words = [
+                w[4]
+                for w in row_words
+                if w[0] < 350 and "บาท/ตัน" not in fix_thai_pdf_text(w[4])
+            ]
+            current_category = fix_thai_pdf_text(" ".join(full_header_words)).strip()
             i += 1
             continue
 
         prov = standardize_province(left_text)
         if prov and "ข้าวเปลือก" in current_category:
-            raw_price = " ".join(col_words) if col_words else ""
-            min_p, max_p = clean_price_cell(raw_price)
-            if min_p is not None and max_p is not None:
-                rec = {
-                    "report_date": date_str,
-                    "section": "PaddyRice",
-                    "category": current_category,
-                    "product_name": current_category,
-                    "province": prov,
-                    "grade": None,
-                    "min_price": min_p,
-                    "max_price": max_p,
-                    "unit": "THB per ton",
-                    "source_file": filename,
-                    "page_number": p_idx + 1,
-                    "extraction_timestamp": now_utc,
-                }
-                ok, _ = validate_record(rec)
-                if ok:
-                    records.append(rec)
+            for wd in target_wds:
+                if wd not in col_bounds:
+                    continue
+                x_min, x_max = col_bounds[wd]
+                col_words = [w[4] for w in row_words if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
+
+                # Peek next line if price is slightly offset vertically
+                if not col_words and i + 1 < len(y_keys) and (y_keys[i + 1] - y <= 4.0):
+                    next_row = sorted(lines[y_keys[i + 1]], key=lambda x: x[0])
+                    next_left = [w[4] for w in next_row if w[0] < 150]
+                    if not standardize_province(fix_thai_pdf_text(" ".join(next_left))):
+                        next_col = [w[4] for w in next_row if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
+                        if next_col:
+                            col_words = next_col
+
+                raw_price = " ".join(col_words) if col_words else ""
+                min_p, max_p = clean_price_cell(raw_price)
+                if min_p is not None and max_p is not None:
+                    rec = {
+                        "report_date": week_dates[wd],
+                        "section": "PaddyRice",
+                        "category": current_category,
+                        "product_name": current_category,
+                        "province": prov,
+                        "grade": None,
+                        "min_price": min_p,
+                        "max_price": max_p,
+                        "unit": "THB per ton",
+                        "source_file": filename,
+                        "page_number": p_idx + 1,
+                        "extraction_timestamp": now_utc,
+                    }
+                    ok, _ = validate_record(rec)
+                    if ok:
+                        records.append(rec)
+        elif left_text.startswith("จังหวัด"):
+            print(f"[Warning] Unrecognized province in {filename} (p.{p_idx + 1}): {left_text}")
+
         i += 1
 
     return records, current_category
@@ -145,14 +161,14 @@ def _parse_paddy_page(
 def _parse_milled_page(
     page: fitz.Page,
     p_idx: int,
-    date_str: str,
-    target_wd: int,
+    week_dates: Dict[int, str],
+    target_wds: List[int],
     filename: str,
     now_utc: str,
 ) -> List[Dict]:
-    """Extract Section 2: MilledRice records with full product hierarchy."""
+    """Extract Section 2: MilledRice records with full product hierarchy across target weekdays."""
     records = []
-    x_min, x_max = _get_target_column_bounds(page, target_wd)
+    col_bounds = _get_page_columns(page)
     words = page.get_text("words")
 
     lines = {}
@@ -173,18 +189,9 @@ def _parse_milled_page(
         left_words = [w[4] for w in row_words if w[0] < 125]
         left_text = fix_thai_pdf_text(" ".join(left_words)).strip()
 
-        col_words = [w[4] for w in row_words if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
-
-        # Peek next line if price is slightly offset
-        if not col_words and i + 1 < len(y_keys) and (y_keys[i + 1] - y <= 4.0):
-            next_row = sorted(lines[y_keys[i + 1]], key=lambda x: x[0])
-            next_left = [w[4] for w in next_row if w[0] < 125]
-            next_col = [w[4] for w in next_row if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
-            if next_col and not any(fix_thai_pdf_text(w) in ["ข้าวใหม่", "100%", "5%"] for w in next_left):
-                col_words = next_col
-                i += 1
-
-        min_p, max_p = clean_price_cell(" ".join(col_words)) if col_words else (None, None)
+        if not left_text:
+            i += 1
+            continue
 
         if left_text == "ข้าวหอมมะลิ":
             parent_group = "ข้าวหอมมะลิ"
@@ -198,31 +205,57 @@ def _parse_milled_page(
             parent_group = None
             current_product = left_text
         elif left_text and left_text != "ข้าวใหม่":
-            if parent_group and any(left_text.startswith(k) for k in ["100%", "ปลายข้าว"]):
+            if parent_group and left_text.startswith("100%"):
                 current_product = f"{parent_group} {left_text}"
             else:
                 current_product = left_text
 
         grade = "ข้าวใหม่" if left_text == "ข้าวใหม่" else None
 
-        if current_product and min_p is not None and max_p is not None:
-            rec = {
-                "report_date": date_str,
-                "section": "MilledRice",
-                "category": "ข้าวสารขายส่งทั่วไป",
-                "product_name": current_product,
-                "province": None,
-                "grade": grade,
-                "min_price": min_p,
-                "max_price": max_p,
-                "unit": "THB per 100 kg",
-                "source_file": filename,
-                "page_number": p_idx + 1,
-                "extraction_timestamp": now_utc,
-            }
-            ok, _ = validate_record(rec)
-            if ok:
-                records.append(rec)
+        if current_product:
+            for wd in target_wds:
+                if wd not in col_bounds:
+                    continue
+                x_min, x_max = col_bounds[wd]
+                col_words = [w[4] for w in row_words if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
+
+                # Backward peek: check previous line if it had price but no product name
+                if not col_words and i > 0 and (y - y_keys[i - 1] <= 4.0):
+                    prev_row = sorted(lines[y_keys[i - 1]], key=lambda x: x[0])
+                    prev_left = [w[4] for w in prev_row if w[0] < 125]
+                    if not prev_left:
+                        prev_col = [w[4] for w in prev_row if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
+                        if prev_col:
+                            col_words = prev_col
+
+                # Forward peek: check next line if price is slightly lower
+                if not col_words and i + 1 < len(y_keys) and (y_keys[i + 1] - y <= 4.0):
+                    next_row = sorted(lines[y_keys[i + 1]], key=lambda x: x[0])
+                    next_left = [w[4] for w in next_row if w[0] < 125]
+                    if not next_left or not any(fix_thai_pdf_text(w) in ["ข้าวใหม่", "100%", "5%"] for w in next_left):
+                        next_col = [w[4] for w in next_row if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
+                        if next_col:
+                            col_words = next_col
+
+                min_p, max_p = clean_price_cell(" ".join(col_words)) if col_words else (None, None)
+                if min_p is not None and max_p is not None:
+                    rec = {
+                        "report_date": week_dates[wd],
+                        "section": "MilledRice",
+                        "category": "ข้าวสารขายส่งทั่วไป",
+                        "product_name": current_product,
+                        "province": None,
+                        "grade": grade,
+                        "min_price": min_p,
+                        "max_price": max_p,
+                        "unit": "THB per 100 kg",
+                        "source_file": filename,
+                        "page_number": p_idx + 1,
+                        "extraction_timestamp": now_utc,
+                    }
+                    ok, _ = validate_record(rec)
+                    if ok:
+                        records.append(rec)
         i += 1
 
     return records
@@ -231,14 +264,14 @@ def _parse_milled_page(
 def _parse_other_page(
     page: fitz.Page,
     p_idx: int,
-    date_str: str,
-    target_wd: int,
+    week_dates: Dict[int, str],
+    target_wds: List[int],
     filename: str,
     now_utc: str,
 ) -> List[Dict]:
-    """Extract Section 3: OtherRice records, separating wholesale from Table 2 retail."""
+    """Extract Section 3: OtherRice records, separating wholesale from Table 2 retail across target weekdays."""
     records = []
-    x_min, x_max = _get_target_column_bounds(page, target_wd)
+    col_bounds = _get_page_columns(page)
     words = page.get_text("words")
 
     lines = {}
@@ -262,19 +295,6 @@ def _parse_other_page(
         left_words = [w[4] for w in row_words if w[0] < 125]
         left_text = fix_thai_pdf_text(" ".join(left_words)).strip()
 
-        col_words = [w[4] for w in row_words if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
-
-        # Peek next line if price is slightly offset
-        if not col_words and i + 1 < len(y_keys) and (y_keys[i + 1] - y <= 4.0):
-            next_row = sorted(lines[y_keys[i + 1]], key=lambda x: x[0])
-            next_left = [w[4] for w in next_row if w[0] < 125]
-            next_col = [w[4] for w in next_row if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
-            if next_col and not any(fix_thai_pdf_text(w) in ["ข้าวใหม่", "ร้านค้าปลีกทั่วไป", "100%", "5%"] for w in next_left):
-                col_words = next_col
-                i += 1
-
-        min_p, max_p = clean_price_cell(" ".join(col_words)) if col_words else (None, None)
-
         # Detect switch to Table 2 (Retail table)
         all_row_text = fix_thai_pdf_text(" ".join([w[4] for w in row_words]))
         if "ราคาขายปลีกข้าวสาร" in all_row_text or "ราคาขายปลีกข้าวสาร" in left_text:
@@ -283,6 +303,10 @@ def _parse_other_page(
             unit = "THB per 15 kg"
             parent_prod = None
             current_prod = None
+            i += 1
+            continue
+
+        if not left_text:
             i += 1
             continue
 
@@ -348,41 +372,67 @@ def _parse_other_page(
             ]:
                 parent_prod = left_text
                 current_prod = f"ข้าวสารขายปลีก {parent_prod}"
-                if not col_words:
-                    i += 1
-                    continue
             elif left_text in ["ร้านค้าปลีกทั่วไป", "ข้าวใหม่", "100%", "5%", "10% เมล็ดยาว", "10% เมล็ดสั้นคละ"]:
                 grade = left_text
                 current_prod = f"ข้าวสารขายปลีก {parent_prod}"
 
-        if current_prod and min_p is not None and max_p is not None:
-            rec = {
-                "report_date": date_str,
-                "section": "OtherRice",
-                "category": current_cat,
-                "product_name": current_prod,
-                "province": None,
-                "grade": grade,
-                "min_price": min_p,
-                "max_price": max_p,
-                "unit": unit,
-                "source_file": filename,
-                "page_number": p_idx + 1,
-                "extraction_timestamp": now_utc,
-            }
-            ok, _ = validate_record(rec)
-            if ok:
-                records.append(rec)
+        if current_prod:
+            for wd in target_wds:
+                if wd not in col_bounds:
+                    continue
+                x_min, x_max = col_bounds[wd]
+                col_words = [w[4] for w in row_words if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
+
+                # Backward peek
+                if not col_words and i > 0 and (y - y_keys[i - 1] <= 4.0):
+                    prev_row = sorted(lines[y_keys[i - 1]], key=lambda x: x[0])
+                    prev_left = [w[4] for w in prev_row if w[0] < 125]
+                    if not prev_left:
+                        prev_col = [w[4] for w in prev_row if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
+                        if prev_col:
+                            col_words = prev_col
+
+                # Forward peek
+                if not col_words and i + 1 < len(y_keys) and (y_keys[i + 1] - y <= 4.0):
+                    next_row = sorted(lines[y_keys[i + 1]], key=lambda x: x[0])
+                    next_left = [w[4] for w in next_row if w[0] < 125]
+                    if not next_left or not any(fix_thai_pdf_text(w) in ["ข้าวใหม่", "ร้านค้าปลีกทั่วไป", "100%", "5%"] for w in next_left):
+                        next_col = [w[4] for w in next_row if x_min <= (w[0] + w[2]) / 2.0 <= x_max]
+                        if next_col:
+                            col_words = next_col
+
+                min_p, max_p = clean_price_cell(" ".join(col_words)) if col_words else (None, None)
+                if min_p is not None and max_p is not None:
+                    rec = {
+                        "report_date": week_dates[wd],
+                        "section": "OtherRice",
+                        "category": current_cat,
+                        "product_name": current_prod,
+                        "province": None,
+                        "grade": grade,
+                        "min_price": min_p,
+                        "max_price": max_p,
+                        "unit": unit,
+                        "source_file": filename,
+                        "page_number": p_idx + 1,
+                        "extraction_timestamp": now_utc,
+                    }
+                    ok, _ = validate_record(rec)
+                    if ok:
+                        records.append(rec)
         i += 1
 
     return records
 
 
-def parse_pdf(pdf_path: str | Path) -> List[Dict]:
+def parse_pdf(pdf_path: str | Path, multi_column: bool = True) -> List[Dict]:
     """Parse a DIT Rice Market Price PDF report into normalized records using PyMuPDF coordinate-based extraction.
 
-    Dynamically handles 3-page and 4-page layouts and all historical variations (2024-2026).
-    Sections: PaddyRice, MilledRice, OtherRice.
+    Args:
+        pdf_path: Path to the PDF file.
+        multi_column: If True (default), extracts all active weekdays (Monday-Friday) in the table matrix,
+                      capturing price adjustments and maximizing data coverage. If False, extracts only
+                      the single weekday corresponding to the report header date.
     """
     pdf_path = Path(pdf_path)
     filename = pdf_path.name
@@ -408,7 +458,11 @@ def parse_pdf(pdf_path: str | Path) -> List[Dict]:
         return records
 
     dt = datetime.strptime(date_str, "%Y-%m-%d")
-    target_wd = dt.weekday()
+    report_wd = dt.weekday()
+    monday_dt = dt - timedelta(days=report_wd)
+    week_dates = {wd: (monday_dt + timedelta(days=wd)).strftime("%Y-%m-%d") for wd in range(5)}
+
+    target_wds = list(range(5)) if multi_column else [min(report_wd, 4)]
 
     # 2. Iterate through pages and classify section
     paddy_category = "ข้าวเปลือก"
@@ -422,14 +476,14 @@ def parse_pdf(pdf_path: str | Path) -> List[Dict]:
 
         if is_paddy:
             p_recs, paddy_category = _parse_paddy_page(
-                page, p_idx, date_str, target_wd, filename, now_utc, paddy_category
+                page, p_idx, week_dates, target_wds, filename, now_utc, paddy_category
             )
             records.extend(p_recs)
         elif is_milled:
-            m_recs = _parse_milled_page(page, p_idx, date_str, target_wd, filename, now_utc)
+            m_recs = _parse_milled_page(page, p_idx, week_dates, target_wds, filename, now_utc)
             records.extend(m_recs)
         elif is_other:
-            o_recs = _parse_other_page(page, p_idx, date_str, target_wd, filename, now_utc)
+            o_recs = _parse_other_page(page, p_idx, week_dates, target_wds, filename, now_utc)
             records.extend(o_recs)
 
     return records
